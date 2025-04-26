@@ -1,0 +1,121 @@
+pipeline {
+
+    agent any
+ 
+    environment {
+
+        AWS_ACCOUNT_ID = "746669217223"
+
+        AWS_DEFAULT_REGION = "ap-south-1"
+
+        HELM_REPO_NAME = 'gcp-infra'
+
+        SECRETS_REPO_NAME = "stage_secrets"
+
+        REPO_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO_NAME}"
+
+    }
+ 
+    stages {
+ 
+        stage('Cloning App Git Repo') {
+
+            steps {
+
+                sh """
+
+                    git clone -b stage git@${SERVICE_NAME}_github:Blitzscale-19/${SERVICE_NAME}.git
+
+                """
+
+            }
+
+        }
+ 
+        stage('Build & Analysis') {
+
+            steps {
+
+                sh '''
+
+                    cd ${SERVICE_NAME}
+
+                    sudo n ${NODE_VERSION}
+
+                    npm ${BUILD_PARAM}
+
+                    npm run build
+
+                '''
+
+            }
+
+        }
+ 
+        stage('Build & Push Docker Image') {
+
+            steps {
+
+                sh """
+
+                    cd ${SERVICE_NAME}
+
+                    GIT_COMMIT_ID="\$(git rev-parse HEAD | cut -c 1-10)"
+
+                    TIMESTAMP=\$(date +'%Y%m%d.%H%M')
+
+                    export IMAGE_TAG=v-\$TIMESTAMP-\$GIT_COMMIT_ID
+
+                    IMG_NAME="\$REPO_URI:\$IMAGE_TAG"
+ 
+                    aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
+ 
+                    docker build --build-arg DOCKER_ENV=staging -t "\$IMG_NAME" .
+
+                    docker push "\$IMG_NAME"
+
+                    echo "\$IMAGE_TAG" > tagname.ini
+
+                    docker rmi -f \$IMG_NAME
+
+                """
+
+            }
+
+        }
+ 
+        stage('Helm Charts Checkout & Deployment') {
+
+            steps {
+
+                dir("stage-helm-update") {
+
+                    script {
+
+                        git branch: 'aws-stage-pipeline', credentialsId: 'abhisheksingh-blitz', url: 'git@github.com:Blitzscale-19/gcp-infra.git'
+ 
+                        sh "ls"
+ 
+                        // Read the generated image tag from file
+
+                        def IMAGE_TAG = sh(script: "cat ../${SERVICE_NAME}/tagname.ini", returnStdout: true).trim()
+ 
+                        sh "sed -i \"s/tag: .*/tag: ${IMAGE_TAG}/\" ./cicd/helm/stage-argocd-helm/${HELM_CHART}/values.yaml"
+
+                        sh "git add ./cicd/helm/stage-argocd-helm/${HELM_CHART}/values.yaml"
+
+                        sh "git commit -m 'Update image tag to ${IMAGE_TAG}'"
+
+                        sh "git push origin HEAD:aws-stage-pipeline"
+
+                    }
+
+                }
+
+            }
+
+        }
+ 
+    }
+
+}
